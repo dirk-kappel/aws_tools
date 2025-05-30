@@ -1,0 +1,83 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description:
+  'This template will create the requirements needed to use session manager to gain access into an EC2 instance from a private subnet.'
+
+Parameters:
+  SharedSubnet:
+    Description: Id of subnet to place vpc endpoint.
+    Type: AWS::EC2::Subnet::Id
+  SharedVPC:
+    Description: VPC Id of of where the endpoints will be placed.
+    Type: AWS::EC2::VPC::Id
+  PrivateDNSEnablded:
+    Description: Enable Private DNS.
+    Type: String
+    AllowedValues: 
+      - true
+      - false
+
+Resources:
+  ssmInterfaceEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties: 
+      PrivateDnsEnabled: !Ref PrivateDNSEnablded
+      SecurityGroupIds: 
+        - !Ref 'VPCendpointSG'
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.ssm'
+      SubnetIds: 
+        - !Ref 'SharedSubnet'
+      VpcEndpointType: Interface
+      VpcId: !Ref 'SharedVPC'
+
+  ssmmessagesInterfaceEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties: 
+      PrivateDnsEnabled: !Ref PrivateDNSEnablded
+      SecurityGroupIds: 
+        - !Ref 'VPCendpointSG'
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.ssmmessages'
+      SubnetIds: 
+        - !Ref 'SharedSubnet'
+      VpcEndpointType: Interface
+      VpcId: !Ref 'SharedVPC'
+
+  ec2messagesInterfaceEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties: 
+      PrivateDnsEnabled: !Ref PrivateDNSEnablded
+      SecurityGroupIds: 
+        - !Ref 'VPCendpointSG'
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.ec2messages'
+      SubnetIds: 
+        - !Ref 'SharedSubnet'
+      VpcEndpointType: Interface
+      VpcId: !Ref 'SharedVPC'
+
+  VPCendpointSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties: 
+      GroupDescription: Allow inbound https
+      GroupName: Allow443In
+      SecurityGroupIngress: 
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 10.0.0.0/8
+      VpcId: !Ref 'SharedVPC'
+      Tags:
+        - Key: 'Name'
+          Value: 'Allow443In'
+
+Outputs:
+  vpceSecurityGroup:
+    Description: VPC Endpoint Security Group
+    Value: !Ref VPCendpointSG
+  ec2Messages:
+    Description: EC2 Messages Endpoint
+    Value: !Ref ec2messagesInterfaceEndpoint
+  ssmMessages:
+    Description: SSM Messages Endpoint
+    Value: !Ref ssmmessagesInterfaceEndpoint
+  ssm:
+    Description: SSM Endpoint
+    Value: !Ref ssmInterfaceEndpoint

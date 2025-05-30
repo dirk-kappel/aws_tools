@@ -1,0 +1,34 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description:
+  'This template will create the Transit Gateway Attachment for the selected VPC.'
+
+Parameters:
+  tgwSubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: Enter the Subnet Ids for the transit gateway attachment.
+  tgwName:
+    Type: String
+    Default: mytgwAttachment
+    Description: Enter name for this transit gateway attachment.
+  myVpcID:
+    Type: AWS::EC2::VPC::Id
+    Description: Enter the ID of the VPC to place the attachment.
+  tgwID:
+    Type: String
+    Description: Enter the transit gateway id.
+
+Resources:
+  myTGWattachment:
+    Type: AWS::EC2::TransitGatewayAttachment
+    Properties: 
+      SubnetIds: !Ref tgwSubnetIds
+      Tags: 
+        - Key: Name
+          Value: !Ref tgwName
+      TransitGatewayId: !Ref tgwID
+      VpcId: !Ref myVpcID
+
+Outputs:
+  tgwAttachmentID:
+    Description: Transit Gateway Attachment ID
+    Value: !Ref myTGWattachment

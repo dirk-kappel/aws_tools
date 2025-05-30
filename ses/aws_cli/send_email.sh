@@ -1,0 +1,1 @@
+aws ses send-email --from <from_email_address> --destination file://destination.json --message file://message.json
