@@ -120,12 +120,12 @@ def load_profile_config():
 def display_profile_menu(profiles):
     """Display available profiles and get user selection."""
     print("\nAvailable AWS profiles:")
-    print("-" * 50)
+    print("=" * 50)
 
     for i, profile in enumerate(profiles, 1):
         print(f"{i}. {profile['name']} - {profile['account_number']} ({profile['region']})")
 
-    print("-" * 50)
+    print("=" * 50)
 
     try:
         while True:
@@ -211,11 +211,10 @@ if __name__ == "__main__":
     print(f"Region: {region_name}")
     print(f"MFA Device: {selected_profile['authenticator_name']}")
 
-    # Prompt the user for the MFA code
-    mfa_code = input("Enter the MFA code from your authenticator app: ")
-
     # Generate the session token
     try:
+        # Prompt the user for the MFA code
+        mfa_code = input("Enter the MFA code from your authenticator app: ")
         token = get_session_token_with_mfa(profile_name, mfa_arn, mfa_code, region_name=region_name, duration=duration_seconds)
     except ClientError as e:
         error_code = e.response["Error"]["Code"]
