@@ -1,4 +1,47 @@
 #!/usr/bin/env python3
+"""
+IAM API MFA Enforcement Checker.
+
+DESCRIPTION:
+This security auditing tool identifies IAM users who can make AWS API calls
+(CLI, SDK, or direct API access) without Multi-Factor Authentication (MFA).
+Unlike console-only MFA checks, this script focuses on programmatic access
+security by analyzing custom IAM policies for MFA enforcement deny statements.
+
+SECURITY IMPORTANCE:
+Users without proper MFA enforcement can:
+- Use AWS CLI commands without MFA tokens
+- Make SDK calls with stolen access keys
+- Bypass MFA for programmatic access
+- Potentially compromise your entire AWS environment
+
+WHAT IT CHECKS:
+✓ User inline policies
+✓ User-attached custom managed policies
+✓ Group inline policies (for user's groups)
+✓ Group-attached custom managed policies
+✗ AWS managed policies (excluded - they don't contain MFA enforcement)
+
+PREREQUISITES:
+- AWS credentials configured (aws configure or environment variables)
+- IAM permissions: iam:ListUsers, iam:ListUserPolicies, iam:GetUserPolicy,
+  iam:ListAttachedUserPolicies, iam:GetPolicy, iam:GetPolicyVersion,
+  iam:ListGroupsForUser, iam:ListGroupPolicies, iam:GetGroupPolicy,
+  iam:ListAttachedGroupPolicies, iam:ListAccessKeys
+
+USAGE:
+    python3 mfa_enforcement_checker.py
+
+OUTPUT:
+- Detailed console analysis of each user
+- Summary of users with/without MFA enforcement
+- Optional CSV export for tracking and remediation
+- Security recommendations for fixing issues
+
+The script validates against the standard MFA enforcement policy pattern that
+denies all actions except MFA setup actions when aws:MultiFactorAuthPresent
+is false.
+"""
 
 import csv
 import json
