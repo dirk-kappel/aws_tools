@@ -1,631 +1,243 @@
 #!/usr/bin/env python3
 """
-IAM API MFA Enforcement Checker.
+AWS IAM MFA Enforcement Checker.
 
-DESCRIPTION:
-This security auditing tool identifies IAM users who can make AWS API calls
-(CLI, SDK, or direct API access) without Multi-Factor Authentication (MFA).
-Unlike console-only MFA checks, this script focuses on programmatic access
-security by analyzing custom IAM policies for MFA enforcement deny statements.
+This script checks if IAM users have MFA (Multi-Factor Authentication) enforcement
+policies attached either directly to their account or inherited through group membership.
 
-SECURITY IMPORTANCE:
-Users without proper MFA enforcement can:
-- Use AWS CLI commands without MFA tokens
-- Make SDK calls with stolen access keys
-- Bypass MFA for programmatic access
-- Potentially compromise your entire AWS environment
+REQUIREMENTS:
+- Python 3.6+
+- boto3 >= 1.35.76
+- botocore >= 1.35.82
+- AWS credentials configured (via AWS CLI, environment variables, or IAM roles)
+
+AWS PERMISSIONS NEEDED:
+- iam:ListUsers
+- iam:ListUserPolicies
+- iam:GetUserPolicy
+- iam:ListAttachedUserPolicies
+- iam:ListGroupsForUser
+- iam:ListGroupPolicies
+- iam:GetGroupPolicy
+- iam:ListAttachedGroupPolicies
+- iam:GetPolicy
+- iam:GetPolicyVersion
 
 WHAT IT CHECKS:
-✓ User inline policies
-✓ User-attached custom managed policies
-✓ Group inline policies (for user's groups)
-✓ Group-attached custom managed policies
-✗ AWS managed policies (excluded - they don't contain MFA enforcement)
+✅ User inline policies
+✅ User attached managed policies
+✅ Group inline policies (inherited)
+✅ Group attached managed policies (inherited)
 
-PREREQUISITES:
-- AWS credentials configured (aws configure or environment variables)
-- IAM permissions: iam:ListUsers, iam:ListUserPolicies, iam:GetUserPolicy,
-  iam:ListAttachedUserPolicies, iam:GetPolicy, iam:GetPolicyVersion,
-  iam:ListGroupsForUser, iam:ListGroupPolicies, iam:GetGroupPolicy,
-  iam:ListAttachedGroupPolicies, iam:ListAccessKeys
+WHAT IT DOES NOT CHECK:
+❌ IAM Roles (only checks Users)
+❌ Permission boundaries
+❌ Resource-based policies
+❌ AWS Organizations Service Control Policies (SCPs)
+❌ Cross-account assume role policies
+❌ Malformed or invalid policy syntax
 
-USAGE:
-    python3 mfa_enforcement_checker.py
+MFA ENFORCEMENT PATTERNS DETECTED:
+1. Blanket deny: Effect="Deny", Action="*", Condition with MFA check
+2. NotAction deny: Effect="Deny", NotAction=[approved actions], Condition with MFA check
 
-OUTPUT:
-- Detailed console analysis of each user
-- Summary of users with/without MFA enforcement
-- Optional CSV export for tracking and remediation
-- Security recommendations for fixing issues
-
-The script validates against the standard MFA enforcement policy pattern that
-denies all actions except MFA setup actions when aws:MultiFactorAuthPresent
-is false.
+APPROVED NOTACTION LIST:
+- iam:CreateVirtualMFADevice
+- iam:EnableMFADevice
+- iam:GetUser
+- iam:ListMFADevices
+- iam:ListVirtualMFADevices
+- iam:ResyncMFADevice
+- sts:GetSessionToken
 """
 
-import csv
-import json
 import sys
-import urllib.parse
-from datetime import datetime, timezone
-from pathlib import Path
 
 import boto3
 from botocore.exceptions import ClientError, NoCredentialsError
 
 # Initialize IAM client
 try:
-    iam_client = boto3.client("iam")  # Adjust region as needed
+    iam_client = boto3.client("iam")
 except NoCredentialsError:
     print("❌ AWS credentials not found. Please configure your credentials.")
     print("   Run 'aws configure' or set environment variables.")
     sys.exit(1)
 
-def _parse_policy_document(policy_document):
-    """Parse policy document from string or dict."""
-    if isinstance(policy_document, str):
-        return json.loads(urllib.parse.unquote(policy_document))
-    return policy_document
+def has_api_mfa_enforcement_deny_statement(policy_document):
+    """Check if policy has an MFA enforcement deny statement."""
+    if "Statement" not in policy_document:
+        return False
 
-def _get_allowed_not_actions():
-    """Get the set of allowed actions in NotAction for MFA enforcement."""
-    return {
-        "iam:CreateVirtualMFADevice",
-        "iam:EnableMFADevice",
-        "iam:GetUser",
-        "iam:ListMFADevices",
-        "iam:ListVirtualMFADevices",
-        "iam:ResyncMFADevice",
-        "sts:GetSessionToken",
-    }
+    statements = policy_document["Statement"]
+
+    # Handle both single statement (object) and multiple statements (list)
+    if not isinstance(statements, list):
+        statements = [statements]
+
+    # Check each statement for MFA enforcement
+    return any(_is_mfa_deny_statement(statement) for statement in statements)
 
 def _is_mfa_deny_statement(statement):
-    """Check if a statement is an MFA deny statement."""
-    return (statement.get("Effect") == "Deny" and
-            "Condition" in statement and
-            "BoolIfExists" in statement["Condition"] and
-            statement["Condition"]["BoolIfExists"].get("aws:MultiFactorAuthPresent") == "false" and
-            statement.get("Resource") == "*")
+    """Check if a statement enforces MFA for human users."""
+    # Must be a deny statement affecting all resources
+    if statement.get("Effect") != "Deny" or statement.get("Resource") != "*":
+        return False
 
-def _check_blanket_deny(statement):
-    """Check if statement is a blanket deny and print appropriate message."""
-    if "NotAction" not in statement:
-        print(f"    🔒 Found blanket MFA deny statement: {statement.get('Sid', 'No Sid')}")
-        print("         Type: Blanket deny (no NotAction) - overrides all other statements")
+    # Must have a condition block with MFA check
+    if "Condition" not in statement:
+        return False
+
+    condition = statement["Condition"]
+    has_mfa_condition = (("Bool" in condition and
+                         condition["Bool"].get("aws:MultiFactorAuthPresent") == "false") or
+                        ("BoolIfExists" in condition and
+                         condition["BoolIfExists"].get("aws:MultiFactorAuthPresent") == "false"))
+
+    if not has_mfa_condition:
+        return False
+
+    # Pattern 1: Blanket deny with Action "*" (denies everything when no MFA)
+    if "Action" in statement and statement["Action"] == "*":
         return True
 
-    if isinstance(statement["NotAction"], list) and len(statement["NotAction"]) == 0:
-        print(f"    🔒 Found blanket MFA deny statement: {statement.get('Sid', 'No Sid')}")
-        print("         Type: Blanket deny (empty NotAction) - overrides all other statements")
-        return True
-
-    return False
-
-def _check_selective_deny(statement, allowed_not_actions):
-    """Check selective deny statement and return if valid."""
-    statement_not_actions = (set(statement["NotAction"])
-                           if isinstance(statement["NotAction"], list)
-                           else {statement["NotAction"]})
-
-    unauthorized_actions = statement_not_actions - allowed_not_actions
-
-    if len(unauthorized_actions) == 0:
-        print(f"    🔒 Found valid selective MFA deny statement: {statement.get('Sid', 'No Sid')}")
-        print(f"         NotActions: {sorted(statement_not_actions)}")
-        return True, False
-    print(f"    ⚠️  Found potentially problematic MFA deny statement: {statement.get('Sid', 'No Sid')}")
-    print(f"         NotActions: {sorted(statement_not_actions)}")
-    print(f"         Unauthorized actions: {sorted(unauthorized_actions)}")
-    return False, True
-
-def has_api_mfa_enforcement_deny_statement(policy_document):
-    """Check if a policy document contains the specific MFA enforcement deny statement."""
-    try:
-        policy = _parse_policy_document(policy_document)
-
-        if "Statement" not in policy or not isinstance(policy["Statement"], list):
-            return False
-
-        allowed_not_actions = _get_allowed_not_actions()
-        mfa_deny_statements = []
-        has_blanket_deny = False
-        has_invalid_statements = False
-
-        # Find all deny statements that enforce MFA for API calls
-        for statement in policy["Statement"]:
-            if _is_mfa_deny_statement(statement):
-                mfa_deny_statements.append(statement)
-
-                if _check_blanket_deny(statement):
-                    has_blanket_deny = True
-                else:
-                    is_valid, is_invalid = _check_selective_deny(statement, allowed_not_actions)
-                    if is_invalid:
-                        has_invalid_statements = True
-
-        # Determine overall policy validity
-        if len(mfa_deny_statements) == 0:
-            return False
-
-        if has_blanket_deny:
-            print("    ✅ Policy is VALID: Blanket deny overrides any permissive statements")
-            return True
-
-        if has_invalid_statements:
-            print("    ❌ Policy is INVALID: Contains unauthorized actions without blanket deny override")
-            return False
-
-    except (json.JSONDecodeError, KeyError, TypeError) as e:
-        print(f"    ⚠️  Error parsing policy document: {e}")
-        return False
-
-    else:
-        print("    ✅ Policy is VALID: All MFA deny statements contain only authorized actions")
-        return True
-
-
-def check_inline_policies_for_mfa_enforcement(user_name):
-    """Check all inline policies for MFA enforcement deny statements."""
-    try:
-        response = iam_client.list_user_policies(UserName=user_name)
-        policy_names = response["PolicyNames"]
-
-        if not policy_names:
-            print("    📄 No inline policies found")
-            return False
-
-        print(f"    📄 Checking {len(policy_names)} inline policy(ies)")
-
-        for policy_name in policy_names:
-            print(f"      - Checking inline policy: {policy_name}")
-            policy_response = iam_client.get_user_policy(
-                UserName=user_name,
-                PolicyName=policy_name,
-            )
-
-            if has_api_mfa_enforcement_deny_statement(policy_response["PolicyDocument"]):
-                return True
-
-    except ClientError as e:
-        print(f"    ❌ Error checking inline policies: {e.response['Error']['Message']}")
-        return False
-    else:
-        return False
-
-def check_custom_managed_policies_for_mfa_enforcement(user_name):
-    """Check custom managed policies (non-AWS managed) for MFA enforcement deny statements."""
-    try:
-        response = iam_client.list_attached_user_policies(UserName=user_name)
-        attached_policies = response["AttachedPolicies"]
-
-        # Filter out AWS managed policies (they don't contain MFA enforcement)
-        custom_policies = [p for p in attached_policies if not p["PolicyArn"].startswith("arn:aws:iam::aws:policy/")]
-
-        if not custom_policies:
-            print("    📋 No custom managed policies attached")
-            return False
-
-        print(f"    📋 Checking {len(custom_policies)} custom managed policy(ies)")
-
-        for attached_policy in custom_policies:
-            policy_arn = attached_policy["PolicyArn"]
-            policy_name = attached_policy["PolicyName"]
-
-            print(f"      - Checking custom managed policy: {policy_name}")
-
-            # Get the policy metadata
-            policy_response = iam_client.get_policy(PolicyArn=policy_arn)
-            default_version_id = policy_response["Policy"]["DefaultVersionId"]
-
-            # Get the policy document
-            policy_version_response = iam_client.get_policy_version(
-                PolicyArn=policy_arn,
-                VersionId=default_version_id,
-            )
-
-            if has_api_mfa_enforcement_deny_statement(policy_version_response["PolicyVersion"]["Document"]):
-                return True
-
-    except ClientError as e:
-        print(f"    ❌ Error checking custom managed policies: {e.response['Error']['Message']}")
-        return False
-    else:
-        return False
-
-def _check_group_inline_policies(group_name):
-    """Check inline policies for a specific group."""
-    group_inline_response = iam_client.list_group_policies(GroupName=group_name)
-    for policy_name in group_inline_response["PolicyNames"]:
-        print(f"        📄 Checking group inline policy: {policy_name}")
-        policy_response = iam_client.get_group_policy(
-            GroupName=group_name,
-            PolicyName=policy_name,
-        )
-        if has_api_mfa_enforcement_deny_statement(policy_response["PolicyDocument"]):
-            return True
-    return False
-
-def _check_group_managed_policies(group_name):
-    """Check managed policies for a specific group."""
-    group_managed_response = iam_client.list_attached_group_policies(GroupName=group_name)
-    custom_group_policies = [p for p in group_managed_response["AttachedPolicies"]
-                           if not p["PolicyArn"].startswith("arn:aws:iam::aws:policy/")]
-
-    for attached_policy in custom_group_policies:
-        policy_arn = attached_policy["PolicyArn"]
-        policy_name = attached_policy["PolicyName"]
-        print(f"        📋 Checking group managed policy: {policy_name}")
-
-        # Get the policy document
-        policy_response = iam_client.get_policy(PolicyArn=policy_arn)
-        default_version_id = policy_response["Policy"]["DefaultVersionId"]
-
-        policy_version_response = iam_client.get_policy_version(
-            PolicyArn=policy_arn,
-            VersionId=default_version_id,
-        )
-
-        if has_api_mfa_enforcement_deny_statement(policy_version_response["PolicyVersion"]["Document"]):
-            return True
-    return False
-
-def check_group_policies_for_mfa_enforcement(user_name):
-    """Check all group policies (inline and managed) for MFA enforcement deny statements."""
-    try:
-        # Get all groups the user belongs to
-        response = iam_client.list_groups_for_user(UserName=user_name)
-        groups = response["Groups"]
-
-        if not groups:
-            print("    👥 User is not in any groups")
-            return False
-
-        print(f"    👥 User belongs to {len(groups)} group(s)")
-
-        for group in groups:
-            group_name = group["GroupName"]
-            print(f"      - Checking group: {group_name}")
-
-            # Check inline policies attached to the group
-            if _check_group_inline_policies(group_name):
-                return True
-
-            # Check managed policies attached to the group
-            if _check_group_managed_policies(group_name):
-                return True
-
-    except ClientError as e:
-        print(f"    ❌ Error checking group policies: {e.response['Error']['Message']}")
-        return False
-    else:
-        return False
-
-def user_has_api_mfa_enforcement(user_name):
-    """Check if a user has ANY custom policy that enforces MFA for API calls."""
-    print(f"\n🔍 Analyzing user: {user_name}")
-
-    # Check inline policies first
-    if check_inline_policies_for_mfa_enforcement(user_name):
-        print("    ✅ MFA enforcement found in user inline policies")
-        return True
-
-    # Check custom managed policies
-    if check_custom_managed_policies_for_mfa_enforcement(user_name):
-        print("    ✅ MFA enforcement found in user custom managed policies")
-        return True
-
-    # Check group policies (both inline and managed)
-    if check_group_policies_for_mfa_enforcement(user_name):
-        print("    ✅ MFA enforcement found in group policies")
-        return True
-
-    print("    ❌ NO MFA enforcement found - user can use access keys without MFA!")
-    return False
-
-def _get_user_access_key_info(user_name):
-    """Get access key information for a user."""
-    try:
-        access_keys = iam_client.list_access_keys(UserName=user_name)
-        has_access_keys = len(access_keys["AccessKeyMetadata"]) > 0
-        active_access_keys = [key for key in access_keys["AccessKeyMetadata"] if key["Status"] == "Active"]
-
-        return {
-            "has_access_keys": has_access_keys,
-            "active_access_keys": len(active_access_keys),
-            "access_key_ids": [key["AccessKeyId"] for key in active_access_keys],
-        }
-    except ClientError:
-        return {
-            "has_access_keys": "Unknown",
-            "active_access_keys": "Unknown",
-            "access_key_ids": [],
+    # Pattern 2: NotAction deny (denies everything EXCEPT listed actions when no MFA)
+    if "NotAction" in statement:
+        # Define allowed actions in NotAction for MFA enforcement
+        allowed_not_actions = {
+            "iam:CreateVirtualMFADevice",
+            "iam:EnableMFADevice",
+            "iam:GetUser",
+            "iam:ListMFADevices",
+            "iam:ListVirtualMFADevices",
+            "iam:ResyncMFADevice",
+            "sts:GetSessionToken",
         }
 
-def _print_user_details(user):
-    """Print details for a user without MFA enforcement."""
-    print(f"👤 {user['user_name']}")
-    create_date = user["create_date"].strftime("%Y-%m-%d") if isinstance(user["create_date"], datetime) else str(user["create_date"])
-    print(f"   📅 Created: {create_date}")
+        # Get NotAction list (handle both single string and list)
+        not_actions = statement["NotAction"]
+        if isinstance(not_actions, str):
+            not_actions = [not_actions]
 
-    if user["last_used"] != "Never" and user["last_used"]:
-        last_used = user["last_used"].strftime("%Y-%m-%d") if isinstance(user["last_used"], datetime) else str(user["last_used"])
-        print(f"   🔐 Last Password Use: {last_used}")
-    else:
-        print(f"   🔐 Last Password Use: {user['last_used']}")
+        statement_not_actions = set(not_actions)
 
-    if user["has_access_keys"] != "Unknown":
-        if user["has_access_keys"]:
-            print(f"   🔑 Active Access Keys: {user['active_access_keys']}")
-            if user["access_key_ids"]:
-                for key_id in user["access_key_ids"]:
-                    print(f"       - {key_id}")
-        else:
-            print("   🔑 Access Keys: None")
-    else:
-        print("   🔑 Access Keys: Could not determine")
-    print()
+        # Check if all actions in NotAction are in our allowed list
+        unauthorized_actions = statement_not_actions - allowed_not_actions
 
-def _print_security_recommendations():
-    """Print security risk information and recommendations."""
-    print("🚨 SECURITY RISK:")
-    print("Users without custom MFA enforcement can:")
-    print("  • Use AWS CLI without MFA")
-    print("  • Use AWS SDK without MFA")
-    print("  • Make direct API calls with access keys without MFA")
-    print("  • Potentially compromise your AWS account if access keys are stolen")
-    print()
-    print("🔧 IMMEDIATE ACTION REQUIRED:")
-    print("Create and attach the MFA enforcement policy to these users:")
-    print("  1. Create an inline policy OR custom managed policy with your MFA enforcement document")
-    print("     (see https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_policies_examples_aws_my-sec-creds-self-manage-mfa-only.html for details)")
-    print("  2. Attach it to all users listed above")
-    print("  3. Verify users can still set up MFA devices")
-    print("  4. Test that API calls require MFA tokens\n")
+        # Valid if no unauthorized actions found
+        return len(unauthorized_actions) == 0
 
-def export_users_to_csv(users_without_mfa, filename=None):
-    """Export users without MFA enforcement to a CSV file."""
-    if not users_without_mfa:
-        print("📄 No users to export - all users have MFA enforcement!")
-        return None
+    return False
 
-    if filename is None:
-        timestamp = datetime.now(tz=timezone.utc).strftime("%Y%m%d_%H%M%S")
-        filename = f"users_without_mfa_{timestamp}.csv"
+def _check_user_inline_policies(username):
+    """Check user's inline policies for MFA enforcement."""
+    inline_policies = iam_client.list_user_policies(UserName=username)
+    for policy_name in inline_policies["PolicyNames"]:
+        policy = iam_client.get_user_policy(UserName=username, PolicyName=policy_name)
+        if has_api_mfa_enforcement_deny_statement(policy["PolicyDocument"]):
+            print(f"✅ User {username} has MFA enforcement via inline policy: {policy_name}")
+            return True
+    return False
 
+def _check_user_managed_policies(username):
+    """Check user's attached managed policies for MFA enforcement."""
+    attached_policies = iam_client.list_attached_user_policies(UserName=username)
+    for policy in attached_policies["AttachedPolicies"]:
+        policy_arn = policy["PolicyArn"]
+        policy_version = iam_client.get_policy(PolicyArn=policy_arn)["Policy"]["DefaultVersionId"]
+        policy_document = iam_client.get_policy_version(PolicyArn=policy_arn, VersionId=policy_version)
+
+        if has_api_mfa_enforcement_deny_statement(policy_document["PolicyVersion"]["Document"]):
+            print(f"✅ User {username} has MFA enforcement via managed policy: {policy['PolicyName']}")
+            return True
+    return False
+
+def _check_user_group_policies(username):
+    """Check group policies for MFA enforcement."""
+    groups = iam_client.list_groups_for_user(UserName=username)
+    for group in groups["Groups"]:
+        group_name = group["GroupName"]
+
+        # Check group inline policies
+        group_inline_policies = iam_client.list_group_policies(GroupName=group_name)
+        for policy_name in group_inline_policies["PolicyNames"]:
+            policy = iam_client.get_group_policy(GroupName=group_name, PolicyName=policy_name)
+            if has_api_mfa_enforcement_deny_statement(policy["PolicyDocument"]):
+                print(f"✅ User {username} has MFA enforcement via group '{group_name}' inline policy: {policy_name}")
+                return True
+
+        # Check group attached managed policies
+        group_attached_policies = iam_client.list_attached_group_policies(GroupName=group_name)
+        for policy in group_attached_policies["AttachedPolicies"]:
+            policy_arn = policy["PolicyArn"]
+            policy_version = iam_client.get_policy(PolicyArn=policy_arn)["Policy"]["DefaultVersionId"]
+            policy_document = iam_client.get_policy_version(PolicyArn=policy_arn, VersionId=policy_version)
+
+            if has_api_mfa_enforcement_deny_statement(policy_document["PolicyVersion"]["Document"]):
+                print(f"✅ User {username} has MFA enforcement via group '{group_name}' managed policy: {policy['PolicyName']}")
+                return True
+    return False
+
+def check_user_mfa_enforcement(username):
+    """Check if a specific IAM user has MFA enforcement policies."""
     try:
-        with Path(filename).open("w", newline="", encoding="utf-8") as csvfile:
-            fieldnames = [
-                "user_name",
-                "create_date",
-                "last_password_used",
-                "has_access_keys",
-                "active_access_keys_count",
-                "access_key_ids",
-            ]
+        # Check user's inline policies
+        if _check_user_inline_policies(username):
+            return True
 
-            writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
-            writer.writeheader()
+        # Check user's attached managed policies
+        if _check_user_managed_policies(username):
+            return True
 
-            for user in users_without_mfa:
-                # Format dates for CSV
-                create_date = (user["create_date"].strftime("%Y-%m-%d %H:%M:%S")
-                             if isinstance(user["create_date"], datetime)
-                             else str(user["create_date"]))
+        # Check group policies
+        if _check_user_group_policies(username):
+            return True
 
-                last_used = "Never"
-                if user["last_used"] != "Never" and user["last_used"]:
-                    last_used = (user["last_used"].strftime("%Y-%m-%d %H:%M:%S")
-                               if isinstance(user["last_used"], datetime)
-                               else str(user["last_used"]))
-
-                # Convert access key IDs list to comma-separated string
-                access_key_ids = ", ".join(user["access_key_ids"]) if user["access_key_ids"] else "None"
-
-                writer.writerow({
-                    "user_name": user["user_name"],
-                    "create_date": create_date,
-                    "last_password_used": last_used,
-                    "has_access_keys": user["has_access_keys"],
-                    "active_access_keys_count": user["active_access_keys"],
-                    "access_key_ids": access_key_ids,
-                })
-
-    except OSError as e:
-        print(f"❌ Error writing CSV file: {e}")
-        return None
+    except ClientError as e:
+        print(f"Error checking user {username}: {e}")
+        return False
 
     else:
-        print(f"📄 Users without MFA enforcement exported to: {filename}")
-        print(f"   Total users exported: {len(users_without_mfa)}")
-        return filename
+        print(f"❌ User {username} does NOT have MFA enforcement")
+        return False
 
-
-def find_users_without_api_mfa_enforcement():
-    """Find all users who can make API calls (including access key usage) without MFA."""
-    print("🔍 Scanning IAM users for API MFA enforcement policies...")
-    print("🔑 This checks if users can use access keys without MFA authentication")
-    print("📋 Checking: inline policies + custom managed policies + group policies")
-    print("=" * 80)
-
+def check_all_users_mfa_enforcement():
+    """Check MFA enforcement for all IAM users."""
     try:
-        # Get all users
+        # Use paginator to handle accounts with many users
         paginator = iam_client.get_paginator("list_users")
-        users = []
 
+        all_users = []
         for page in paginator.paginate():
-            users.extend(page["Users"])
+            all_users.extend(page["Users"])
 
-        users_without_api_mfa = []
-        users_with_api_mfa = []
+        print(f"Checking MFA enforcement for {len(all_users)} users...\n")
 
-        print(f"\n📊 Found {len(users)} users to analyze...\n")
+        users_without_mfa = []
 
-        # Check each user
-        for i, user in enumerate(users, 1):
-            user_name = user["UserName"]
-            print(f"[{i}/{len(users)}] Analyzing user: {user_name}")
+        for user in all_users:
+            username = user["UserName"]
+            if not check_user_mfa_enforcement(username):
+                users_without_mfa.append(username)
 
-            if user_has_api_mfa_enforcement(user_name):
-                users_with_api_mfa.append(user_name)
-            else:
-                access_key_info = _get_user_access_key_info(user_name)
-                user_info = {
-                    "user_name": user_name,
-                    "create_date": user["CreateDate"],
-                    "last_used": user.get("PasswordLastUsed", "Never"),
-                }
-                user_info.update(access_key_info)
-                users_without_api_mfa.append(user_info)
-
-        # Display results
-        print("\n" + "=" * 80)
-        print("📊 RESULTS SUMMARY - API MFA ENFORCEMENT")
-        print("=" * 80)
-
-        print(f"✅ Users WITH custom MFA enforcement: {len(users_with_api_mfa)}")
-        print(f"❌ Users WITHOUT custom MFA enforcement: {len(users_without_api_mfa)}")
-
-        if users_without_api_mfa:
-            print("\n⚠️  CRITICAL SECURITY ISSUE: USERS CAN USE ACCESS KEYS WITHOUT MFA")
-            print("=" * 80)
-            print("These users can make AWS API calls (CLI, SDK, direct API) without MFA:")
-            print("-" * 80)
-
-            for user in users_without_api_mfa:
-                _print_user_details(user)
-
-            _print_security_recommendations()
-        else:
-            print("\n🎉 EXCELLENT! All users have custom MFA enforcement!")
-            print("No users can bypass MFA when using access keys for API calls.")
-
-    except ClientError as e:
-        print(f"❌ Error scanning users: {e.response['Error']['Message']}")
-        sys.exit(1)
-    else:
-        return users_without_api_mfa
-
-def validate_target_policy():
-    """Validate and explain the target MFA policy."""
-    target_policy = {
-        "Version": "2012-10-17",
-        "Statement": [
-            {
-                "Sid": "AllowViewAccountInfo",
-                "Effect": "Allow",
-                "Action": "iam:ListVirtualMFADevices",
-                "Resource": "*",
-            },
-            {
-                "Sid": "AllowManageOwnVirtualMFADevice",
-                "Effect": "Allow",
-                "Action": ["iam:CreateVirtualMFADevice"],
-                "Resource": "arn:aws-us-gov:iam::*:mfa/*",
-            },
-            {
-                "Sid": "AllowManageOwnUserMFA",
-                "Effect": "Allow",
-                "Action": [
-                    "iam:DeactivateMFADevice",
-                    "iam:EnableMFADevice",
-                    "iam:GetUser",
-                    "iam:GetMFADevice",
-                    "iam:ListMFADevices",
-                    "iam:ResyncMFADevice",
-                ],
-                "Resource": "arn:aws-us-gov:iam::*:user/${aws:username}",
-            },
-            {
-                "Sid": "DenyAllExceptListedIfNoMFA",
-                "Effect": "Deny",
-                "NotAction": [
-                    "iam:CreateVirtualMFADevice",
-                    "iam:EnableMFADevice",
-                    "iam:GetUser",
-                    "iam:ListMFADevices",
-                    "iam:ListVirtualMFADevices",
-                    "iam:ResyncMFADevice",
-                    "sts:GetSessionToken",
-                ],
-                "Resource": "*",
-                "Condition": {
-                    "BoolIfExists": {
-                        "aws:MultiFactorAuthPresent": "false",
-                    },
-                },
-            },
-        ],
-    }
-
-    print("🛡️  TARGET POLICY ANALYSIS:")
-    print("-" * 40)
-    print("✅ This custom policy enforces MFA for ALL AWS API calls including:")
-    print("   • AWS CLI commands")
-    print("   • AWS SDK calls")
-    print("   • Direct API calls with access keys")
-    print("   • Console access")
-    print()
-    print("🔓 The policy allows these actions WITHOUT MFA (for initial setup):")
-    print("   • iam:CreateVirtualMFADevice")
-    print("   • iam:EnableMFADevice")
-    print("   • iam:GetUser")
-    print("   • iam:ListMFADevices")
-    print("   • iam:ListVirtualMFADevices")
-    print("   • iam:ResyncMFADevice")
-    print("   • sts:GetSessionToken")
-    print()
-    print("Note: AWS managed policies do not contain MFA enforcement")
-    print("   Checking: user inline + user managed + group inline + group managed")
-    print()
-
-    return has_api_mfa_enforcement_deny_statement(target_policy)
-
-def main():
-    """Main execution function."""
-    print("🛡️  IAM API MFA ENFORCEMENT CHECKER")
-    print("📡 Finds users who can use access keys without MFA")
-    print("🎯 Checks: User policies + Group policies (excludes AWS managed)")
-    print("=" * 60)
-
-    if not validate_target_policy():
-        print("❌ Error: Could not validate the target MFA policy!")
-        sys.exit(1)
-
-    try:
-        users_without_mfa = find_users_without_api_mfa_enforcement()
-
-        print("✅ Analysis completed successfully!")
+        print(f"\n{'='*50}")
+        print(f"SUMMARY: {len(users_without_mfa)} of {len(all_users)} users lack MFA enforcement")
 
         if users_without_mfa:
-            print(f"\n🚨 SECURITY ALERT: {len(users_without_mfa)} users found without custom MFA enforcement!")
+            print("\nUsers without MFA enforcement:")
+            for username in users_without_mfa:
+                print(f"  - {username}")
 
-            # Ask user if they want to export to CSV
-            try:
-                while True:
-                    export_choice = input("\n📋 Would you like to export these users to a CSV file? (y/n): ").lower().strip()
-                    if export_choice in ["y", "yes"]:
-                        csv_filename = export_users_to_csv(users_without_mfa)
-                        if csv_filename:
-                            print(f"📋 Detailed report saved to: {csv_filename}")
-                        break
-                    if export_choice in ["n", "no"]:
-                        print("📋 CSV export skipped.")
-                        break
-                    print("❌ Please enter 'y' for yes or 'n' for no.")
-            except KeyboardInterrupt:
-                print("\n📋 CSV export cancelled.")
+            print("\n" + "="*50)
+            print("REMEDIATION STEPS:")
+            print("  1. Create an inline policy OR custom managed policy with your MFA enforcement document")
+            print("     (see https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_policies_examples_aws_my-sec-creds-self-manage-mfa-only.html for details)")
+            print("  2. Attach the policy directly to users OR to groups that users belong to")
+            print("  3. Re-run this script to verify MFA enforcement is now detected")
 
-            sys.exit(1)  # Exit with error code to indicate security issue
-        else:
-            print("\n🎉 Security check passed: All users have custom MFA enforcement!")
-            sys.exit(0)
-
-    except KeyboardInterrupt:
-        print("\n⚠️  Analysis interrupted by user")
-        sys.exit(1)
     except ClientError as e:
-        print(f"❌ Analysis failed: {e.response['Error']['Message']}")
-        sys.exit(1)
+        print(f"Error: {e}")
 
 if __name__ == "__main__":
-    main()
+    # Check all users
+    check_all_users_mfa_enforcement()
