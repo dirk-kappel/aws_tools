@@ -28,6 +28,7 @@ WHAT IT CHECKS:
 ✅ User attached managed policies
 ✅ Group inline policies (inherited)
 ✅ Group attached managed policies (inherited)
+✅ User has an MFA device configured
 
 WHAT IT DOES NOT CHECK:
 ❌ IAM Roles (only checks Users)
@@ -51,10 +52,18 @@ APPROVED NOTACTION LIST:
 - sts:GetSessionToken
 """
 
+import csv
 import sys
+from datetime import datetime, timezone
+from pathlib import Path
 
 import boto3
 from botocore.exceptions import ClientError, NoCredentialsError
+
+mfa_user_summary = {}
+users_without_mfa = []
+no_mfa_device = []
+all_users = []
 
 # Initialize IAM client
 try:
@@ -183,14 +192,17 @@ def check_user_mfa_enforcement(username):
     try:
         # Check user's inline policies
         if _check_user_inline_policies(username):
+            mfa_user_summary[username]["MFA_Enforcement"] = "True"
             return True
 
         # Check user's attached managed policies
         if _check_user_managed_policies(username):
+            mfa_user_summary[username]["MFA_Enforcement"] = "True"
             return True
 
         # Check group policies
         if _check_user_group_policies(username):
+            mfa_user_summary[username]["MFA_Enforcement"] = "True"
             return True
 
     except ClientError as e:
@@ -199,6 +211,7 @@ def check_user_mfa_enforcement(username):
 
     else:
         print(f"❌ User {username} does NOT have MFA enforcement")
+        mfa_user_summary[username]["MFA_Enforcement"] = "False"
         return False
 
 def check_all_users_mfa_enforcement():
@@ -207,79 +220,113 @@ def check_all_users_mfa_enforcement():
         # Use paginator to handle accounts with many users
         paginator = iam_client.get_paginator("list_users")
 
-        all_users = []
         for page in paginator.paginate():
             all_users.extend(page["Users"])
 
         print(f"Checking MFA enforcement for {len(all_users)} users...\n")
 
-        users_without_mfa = []
-        no_mfa_device = []
-
         for user in all_users:
             username = user["UserName"]
+            mfa_user_summary[username] = {}
             if not check_user_mfa_enforcement(username):
                 users_without_mfa.append(username)
             if not get_mfa_device(username):
                 no_mfa_device.append(username)
 
-        print("\n" + "="*50)
-        print(f"SUMMARY: {len(no_mfa_device)} of {len(all_users)} users do not have an MFA device configured")
-
-        if no_mfa_device:
-            print("\nUsers without an MFA device configured:")
-            for username in no_mfa_device:
-                print(f"  - {username}")
-
-            print("\n" + "-"*50)
-            print("REMEDIATION STEPS:")
-            print("  1. Users need to configure an MFA device in the AWS Management Console")
-            print("     (see https://docs.aws.amazon.com/IAM/latest/UserGuide/id_credentials_mfa_enable_virtual.html for details)")
-            print("  2. Re-run this script to verify MFA enforcement is now detected")
-
-        print(f"\n{'='*50}")
-        print(f"SUMMARY: {len(users_without_mfa)} of {len(all_users)} users lack MFA enforcement")
-
-        if users_without_mfa:
-            print("\nUsers without MFA enforcement for Access Key usage:")
-            for username in users_without_mfa:
-                print(f"  - {username}")
-
-            print("\n" + "-"*50)
-            print("REMEDIATION STEPS:")
-            print("  1. Create an inline policy OR custom managed policy with your MFA enforcement document")
-            print("     (see https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_policies_examples_aws_my-sec-creds-self-manage-mfa-only.html for details)")
-            print("  2. Attach the policy directly to users OR to groups that users belong to")
-            print("  3. Re-run this script to verify MFA enforcement is now detected")
-
     except ClientError as e:
         print(f"Error: {e}")
 
-def get_mfa_device(user_name):
+    else:
+        return mfa_user_summary
+
+def get_mfa_device(username):
     """
     Get the MFA device for the current user.
 
     Args:
-        user_name (str): The IAM username to check for MFA device.
+        username (str): The IAM username to check for MFA device.
 
     Returns:
         dict: The MFA device details if found, otherwise None.
 
     """
     try:
-        response = iam_client.list_mfa_devices(UserName=user_name)
+        response = iam_client.list_mfa_devices(UserName=username)
         if response["MFADevices"]:
-            print(f"✅ MFA device found for user '{user_name}'")
+            print(f"✅ MFA device found for user '{username}'")
+            mfa_user_summary[username]["MFA_Device_Configured"] = "True"
             return response["MFADevices"][0]
     except ClientError as e:
         print(f"Error retrieving MFA devices: {e}")
         return None
     else:
-        print(f"❌ No MFA device found for user '{user_name}'")
+        print(f"❌ No MFA device found for user '{username}'")
+        mfa_user_summary[username]["MFA_Device_Configured"] = "False"
         return None
+
+def generate_csv():
+    """Generate a CSV summary of MFA enforcement status for all users."""
+    try:
+        # Generate timestamped filename
+        timestamp = datetime.now(tz=timezone.utc).strftime("%Y%m%d_%H%M%S")
+        filename = f"mfa_summary_{timestamp}.csv"
+
+        with Path(filename).open("w", newline="", encoding="utf-8") as csvfile:
+            writer = csv.writer(csvfile)
+
+            # Write header
+            writer.writerow(["User Name", "MFA Enforcement", "MFA Device Configured"])
+
+            # Write user data
+            for username, details in mfa_user_summary.items():
+                mfa_enforcement_status = details.get("MFA_Enforcement", "Unknown")
+                mfa_device_status = details.get("MFA_Device_Configured", "Unknown")
+                writer.writerow([username, mfa_enforcement_status, mfa_device_status])
+
+    except (OSError, PermissionError) as e:
+        print(f"❌ File system error generating CSV: {e}")
+        return None
+    except (TypeError, UnicodeEncodeError) as e:
+        print(f"❌ Data encoding error generating CSV: {e}")
+        return None
+
+    else:
+        print(f"\n✅ CSV summary generated: {filename}")
+        return filename
+
+def print_mfa_summary():
+    """Print a summary of MFA enforcement status for all users."""
+    print("\n" + "="*50)
+    print(f"SUMMARY: {len(no_mfa_device)} of {len(all_users)} users do not have an MFA device configured")
+
+    if no_mfa_device:
+        print("\nUsers without an MFA device configured:")
+        for username in no_mfa_device:
+            print(f"  - {username}")
+
+        print("\n" + "-"*50)
+        print("REMEDIATION STEPS:")
+        print("  1. Users need to configure an MFA device in the AWS Management Console")
+        print("     (see https://docs.aws.amazon.com/IAM/latest/UserGuide/id_credentials_mfa_enable_virtual.html for details)")
+        print("  2. Re-run this script to verify MFA enforcement is now detected")
+
+    print(f"\n{'='*50}")
+    print(f"SUMMARY: {len(users_without_mfa)} of {len(all_users)} users lack MFA enforcement")
+
+    if users_without_mfa:
+        print("\nUsers without MFA enforcement for Access Key usage:")
+        for username in users_without_mfa:
+            print(f"  - {username}")
+
+        print("\n" + "-"*50)
+        print("REMEDIATION STEPS:")
+        print("  1. Create an inline policy OR custom managed policy with your MFA enforcement document")
+        print("     (see https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_policies_examples_aws_my-sec-creds-self-manage-mfa-only.html for details)")
+        print("  2. Attach the policy directly to users OR to groups that users belong to")
+        print("  3. Re-run this script to verify MFA enforcement is now detected")
 
 if __name__ == "__main__":
     # Check all users
     check_all_users_mfa_enforcement()
-
-
+    print_mfa_summary()
+    generate_csv()
