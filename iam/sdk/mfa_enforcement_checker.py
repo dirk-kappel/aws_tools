@@ -214,21 +214,38 @@ def check_all_users_mfa_enforcement():
         print(f"Checking MFA enforcement for {len(all_users)} users...\n")
 
         users_without_mfa = []
+        no_mfa_device = []
 
         for user in all_users:
             username = user["UserName"]
             if not check_user_mfa_enforcement(username):
                 users_without_mfa.append(username)
+            if not get_mfa_device(username):
+                no_mfa_device.append(username)
+
+        print("\n" + "="*50)
+        print(f"SUMMARY: {len(no_mfa_device)} of {len(all_users)} users do not have an MFA device configured")
+
+        if no_mfa_device:
+            print("\nUsers without an MFA device configured:")
+            for username in no_mfa_device:
+                print(f"  - {username}")
+
+            print("\n" + "-"*50)
+            print("REMEDIATION STEPS:")
+            print("  1. Users need to configure an MFA device in the AWS Management Console")
+            print("     (see https://docs.aws.amazon.com/IAM/latest/UserGuide/id_credentials_mfa_enable_virtual.html for details)")
+            print("  2. Re-run this script to verify MFA enforcement is now detected")
 
         print(f"\n{'='*50}")
         print(f"SUMMARY: {len(users_without_mfa)} of {len(all_users)} users lack MFA enforcement")
 
         if users_without_mfa:
-            print("\nUsers without MFA enforcement:")
+            print("\nUsers without MFA enforcement for Access Key usage:")
             for username in users_without_mfa:
                 print(f"  - {username}")
 
-            print("\n" + "="*50)
+            print("\n" + "-"*50)
             print("REMEDIATION STEPS:")
             print("  1. Create an inline policy OR custom managed policy with your MFA enforcement document")
             print("     (see https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_policies_examples_aws_my-sec-creds-self-manage-mfa-only.html for details)")
@@ -238,6 +255,31 @@ def check_all_users_mfa_enforcement():
     except ClientError as e:
         print(f"Error: {e}")
 
+def get_mfa_device(user_name):
+    """
+    Get the MFA device for the current user.
+
+    Args:
+        user_name (str): The IAM username to check for MFA device.
+
+    Returns:
+        dict: The MFA device details if found, otherwise None.
+
+    """
+    try:
+        response = iam_client.list_mfa_devices(UserName=user_name)
+        if response["MFADevices"]:
+            print(f"✅ MFA device found for user '{user_name}'")
+            return response["MFADevices"][0]
+    except ClientError as e:
+        print(f"Error retrieving MFA devices: {e}")
+        return None
+    else:
+        print(f"❌ No MFA device found for user '{user_name}'")
+        return None
+
 if __name__ == "__main__":
     # Check all users
     check_all_users_mfa_enforcement()
+
+
