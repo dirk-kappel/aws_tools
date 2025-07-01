@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# mfa_enforcement_checker.py
 """
 AWS IAM MFA Enforcement Checker.
 
@@ -228,14 +229,20 @@ def check_all_users_mfa_enforcement():
         for user in all_users:
             username = user["UserName"]
             mfa_user_summary[username] = {}
+
+            # Check console access
+            check_console_access(username)
+
+            # Check MFA enforcement policy
             if not check_user_mfa_enforcement(username):
                 users_without_mfa.append(username)
+
+            # Check MFA device configured
             if not get_mfa_device(username):
                 no_mfa_device.append(username)
 
     except ClientError as e:
         print(f"Error: {e}")
-
     else:
         return mfa_user_summary
 
@@ -275,13 +282,14 @@ def generate_csv():
             writer = csv.writer(csvfile)
 
             # Write header
-            writer.writerow(["User Name", "MFA Enforcement", "MFA Device Configured"])
+            writer.writerow(["User Name", "Console Access", "MFA Console Configured", "MFA Enforcement Policy"])
 
             # Write user data
             for username, details in mfa_user_summary.items():
-                mfa_enforcement_status = details.get("MFA_Enforcement", "Unknown")
+                console_access = details.get("Console_Access", "Unknown")
                 mfa_device_status = details.get("MFA_Device_Configured", "Unknown")
-                writer.writerow([username, mfa_enforcement_status, mfa_device_status])
+                mfa_enforcement_status = details.get("MFA_Enforcement", "Unknown")
+                writer.writerow([username, console_access,  mfa_device_status, mfa_enforcement_status])
 
     except (OSError, PermissionError) as e:
         print(f"❌ File system error generating CSV: {e}")
@@ -297,7 +305,7 @@ def generate_csv():
 def print_mfa_summary():
     """Print a summary of MFA enforcement status for all users."""
     print("\n" + "="*50)
-    print(f"SUMMARY: {len(no_mfa_device)} of {len(all_users)} users do not have an MFA device configured")
+    print(f"SUMMARY: {len(no_mfa_device)} of {len(all_users)} users do not have MFA device configured for console access")
 
     if no_mfa_device:
         print("\nUsers without an MFA device configured:")
@@ -314,7 +322,7 @@ def print_mfa_summary():
     print(f"SUMMARY: {len(users_without_mfa)} of {len(all_users)} users lack MFA enforcement")
 
     if users_without_mfa:
-        print("\nUsers without MFA enforcement for Access Key usage:")
+        print("\nUsers without MFA enforcement policy for Access Key usage:")
         for username in users_without_mfa:
             print(f"  - {username}")
 
@@ -324,6 +332,23 @@ def print_mfa_summary():
         print("     (see https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_policies_examples_aws_my-sec-creds-self-manage-mfa-only.html for details)")
         print("  2. Attach the policy directly to users OR to groups that users belong to")
         print("  3. Re-run this script to verify MFA enforcement is now detected")
+
+def check_console_access(username):
+    """Check if user has console access (login profile)."""
+    try:
+        iam_client.get_login_profile(UserName=username)
+        print(f"✅ User {username} has console access")
+        mfa_user_summary[username]["Console_Access"] = "True"
+    except ClientError as e:
+        if e.response["Error"]["Code"] == "NoSuchEntity":
+            print(f"❌ User {username} has no console access")
+            mfa_user_summary[username]["Console_Access"] = "False"
+            return False
+        print(f"Error checking console access for {username}: {e}")
+        mfa_user_summary[username]["Console_Access"] = "Error"
+        return False
+    else:
+        return True
 
 if __name__ == "__main__":
     # Check all users
