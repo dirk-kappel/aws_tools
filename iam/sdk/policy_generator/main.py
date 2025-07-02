@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # main.py
 """
-CloudTrail Analysis Orchestrator
+CloudTrail Analysis Orchestrator.
 
 Main entry point for the CloudTrail log analysis and least privilege policy generation workflow.
 Provides a unified interface to download logs, analyze user activity, and generate IAM policies.
@@ -14,6 +14,14 @@ import sys
 import time
 from pathlib import Path
 from typing import NoReturn
+
+# Constants
+MAX_FILES_DISPLAY = 3  # Maximum files to display in status
+VALID_MENU_CHOICES = ["1", "2", "3", "4", "5", "6", "7"]
+
+# AWS S3 API Pricing (USD, as of 2025)
+S3_LIST_COST_PER_1000 = 0.0005  # LIST requests
+S3_GET_COST_PER_1000 = 0.0004   # GET requests
 
 # Module availability check
 MODULES = {
@@ -70,11 +78,11 @@ def print_main_menu():
 def run_module(module_name: str, description: str) -> bool:
     """
     Run a module and handle errors.
-    
+
     Args:
         module_name: Name of the module to run
         description: Human-readable description
-        
+
     Returns:
         True if successful, False otherwise
 
@@ -92,10 +100,8 @@ def run_module(module_name: str, description: str) -> bool:
     print("="*60)
 
     try:
-        # Run the module as a subprocess
-        result = subprocess.run([sys.executable, filename], check=True)
-        print(f"\n✅ {description} completed successfully!")
-        return True
+        # Run the module as a subprocess (trusted internal modules only)
+        subprocess.run([sys.executable, filename], check=True)  # noqa: S603
 
     except subprocess.CalledProcessError as e:
         print(f"\n❌ {description} failed with exit code: {e.returncode}")
@@ -106,10 +112,118 @@ def run_module(module_name: str, description: str) -> bool:
     except KeyboardInterrupt:
         print(f"\n⚠️  {description} interrupted by user")
         return False
+    else:
+        print(f"\n✅ {description} completed successfully!")
+        return True
+
+
+def estimate_download_cost() -> dict[str, float] | None:
+    """
+    Estimate the cost of downloading CloudTrail logs.
+
+    Returns:
+        Dictionary with cost estimates or None if estimation fails
+
+    """
+    print("\n💰 COST ESTIMATION")
+    print("="*40)
+    print("Let's estimate the cost of downloading CloudTrail logs...")
+    print()
+
+    try:
+        # Get basic parameters for estimation
+        print("Please provide some basic information for cost estimation:")
+
+        # Date range
+        date_range = input("📅 How many days of logs? [default: 7]: ").strip()
+        days = int(date_range) if date_range.isdigit() else 7
+
+        # Regions
+        regions_input = input("🌍 How many AWS regions? [default: 1]: ").strip()
+        regions = int(regions_input) if regions_input.isdigit() else 1
+
+        # Activity level
+        print("\n📊 Activity level:")
+        print("   1. Low (small account, few resources)")
+        print("   2. Medium (typical production account)")
+        print("   3. High (large account, many resources)")
+        activity_input = input("Select activity level (1-3) [default: 2]: ").strip()
+        activity_level = int(activity_input) if activity_input in ["1", "2", "3"] else 2
+
+        # Estimate API calls
+        # Base estimates per day per region
+        base_list_calls = {"1": 10, "2": 50, "3": 200}[str(activity_level)]
+        base_get_calls = {"1": 100, "2": 500, "3": 2000}[str(activity_level)]
+
+        # Calculate total calls
+        total_list_calls = base_list_calls * days * regions
+        total_get_calls = base_get_calls * days * regions
+
+        # Calculate costs
+        list_cost = (total_list_calls / 1000) * S3_LIST_COST_PER_1000
+        get_cost = (total_get_calls / 1000) * S3_GET_COST_PER_1000
+        total_cost = list_cost + get_cost
+
+        # Display estimate
+        print("\n📊 ESTIMATED COSTS:")
+        print("="*30)
+        print(f"📅 Date range: {days} days")
+        print(f"🌍 Regions: {regions}")
+        print(f"📈 Activity level: {['Low', 'Medium', 'High'][activity_level-1]}")
+        print()
+        print(f"📋 LIST requests: ~{total_list_calls:,}")
+        print(f"📥 GET requests: ~{total_get_calls:,}")
+        print(f"🔢 Total requests: ~{total_list_calls + total_get_calls:,}")
+        print()
+        print(f"💸 LIST costs: ${list_cost:.6f}")
+        print(f"💸 GET costs: ${get_cost:.6f}")
+        print(f"💸 Total API costs: ${total_cost:.6f}")
+        print()
+
+        if total_cost < 0.01:
+            print("💡 Estimated cost is negligible (< $0.01)")
+        elif total_cost < 0.10:
+            print("💡 Estimated cost is very low (< $0.10)")
+        elif total_cost < 1.00:
+            print("💡 Estimated cost is low (< $1.00)")
+        else:
+            print("⚠️  Estimated cost is significant (> $1.00)")
+
+        print("\n🔍 Note: This is an estimate only. Actual costs may vary.")
+        print("Data transfer costs are not included (depend on your location).")
+
+    except (ValueError, KeyboardInterrupt):
+        print("\n❌ Cost estimation cancelled or invalid input")
+        return None
+
+    else:
+        return {
+            "days": days,
+            "regions": regions,
+            "activity_level": activity_level,
+            "list_calls": total_list_calls,
+            "get_calls": total_get_calls,
+            "list_cost": list_cost,
+            "get_cost": get_cost,
+            "total_cost": total_cost,
+        }
 
 
 def download_cloudtrail_logs() -> bool:
-    """Download CloudTrail logs from S3."""
+    """Download CloudTrail logs from S3 with cost estimation."""
+    print("\n📥 CLOUDTRAIL LOG DOWNLOAD")
+    print("="*50)
+
+    # Show cost estimation first
+    cost_estimate = estimate_download_cost()
+
+    if cost_estimate:
+        print(f"\n💰 Estimated cost: ${cost_estimate['total_cost']:.6f}")
+        confirm = input("\nProceed with download? (y/n): ").strip().lower()
+        if confirm not in ["y", "yes"]:
+            print("❌ Download cancelled")
+            return False
+
     return run_module("download_cloudtrail_logs", "CloudTrail Log Download")
 
 
@@ -219,10 +333,10 @@ def show_status() -> None:
             files = list(current_dir.glob(pattern))
             if files:
                 print(f"   ✅ {description}: {len(files)} files found")
-                for file in files[:3]:  # Show first 3 files
+                for file in files[:MAX_FILES_DISPLAY]:  # Show first few files
                     print(f"      📄 {file.name}")
-                if len(files) > 3:
-                    print(f"      ... and {len(files) - 3} more")
+                if len(files) > MAX_FILES_DISPLAY:
+                    print(f"      ... and {len(files) - MAX_FILES_DISPLAY} more")
             else:
                 print(f"   ❌ {description}: No files matching {pattern}")
 
@@ -266,18 +380,15 @@ def show_help() -> None:
 
 def get_user_choice() -> str:
     """Get and validate user menu choice."""
-    while True:
-        try:
+    try:
+        while True:
             choice = input("Enter your choice (1-7): ").strip()
-            if choice in ["1", "2", "3", "4", "5", "6", "7"]:
+            if choice in VALID_MENU_CHOICES:
                 return choice
             print("❌ Invalid choice. Please enter a number from 1-7.")
-        except KeyboardInterrupt:
-            print("\n\n🚪 Goodbye!")
-            sys.exit(0)
-        except EOFError:
-            print("\n\n🚪 Goodbye!")
-            sys.exit(0)
+    except (KeyboardInterrupt, EOFError):
+        print("\n\n🚪 Goodbye!")
+        sys.exit(0)
 
 
 def handle_missing_modules(available: dict[str, bool]) -> None:
@@ -294,6 +405,52 @@ def handle_missing_modules(available: dict[str, bool]) -> None:
         print()
 
 
+def handle_menu_choice(choice: str, available: dict[str, bool]) -> None:
+    """
+    Handle a specific menu choice.
+
+    Args:
+        choice: Menu choice string
+        available: Dictionary of module availability
+
+    """
+    if choice == "1":
+        if available["download_cloudtrail_logs"]:
+            download_cloudtrail_logs()
+        else:
+            print("❌ CloudTrail log downloader not available")
+
+    elif choice == "2":
+        if available["unique_events_from_logs"]:
+            analyze_user_activity()
+        else:
+            print("❌ User activity analyzer not available")
+
+    elif choice == "3":
+        if available["generate_policy"]:
+            generate_iam_policy()
+        else:
+            print("❌ Policy generator not available")
+
+    elif choice == "4":
+        if all(available.values()):
+            run_complete_workflow()
+        else:
+            print("❌ Cannot run complete workflow - some modules are missing")
+            show_status()
+
+    elif choice == "5":
+        show_status()
+
+    elif choice == "6":
+        show_help()
+
+    elif choice == "7":
+        print("\n🚪 Thank you for using CloudTrail Analysis Tool!")
+        print("Remember to test your generated policies before production deployment.")
+        sys.exit(0)
+
+
 def main() -> NoReturn:
     """Main application loop."""
     print_banner()
@@ -308,41 +465,7 @@ def main() -> NoReturn:
         print_main_menu()
         choice = get_user_choice()
 
-        if choice == "1":
-            if available["download_cloudtrail_logs"]:
-                download_cloudtrail_logs()
-            else:
-                print("❌ CloudTrail log downloader not available")
-
-        elif choice == "2":
-            if available["unique_events_from_logs"]:
-                analyze_user_activity()
-            else:
-                print("❌ User activity analyzer not available")
-
-        elif choice == "3":
-            if available["generate_policy"]:
-                generate_iam_policy()
-            else:
-                print("❌ Policy generator not available")
-
-        elif choice == "4":
-            if all(available.values()):
-                run_complete_workflow()
-            else:
-                print("❌ Cannot run complete workflow - some modules are missing")
-                show_status()
-
-        elif choice == "5":
-            show_status()
-
-        elif choice == "6":
-            show_help()
-
-        elif choice == "7":
-            print("\n🚪 Thank you for using CloudTrail Analysis Tool!")
-            print("Remember to test your generated policies before production deployment.")
-            sys.exit(0)
+        handle_menu_choice(choice, available)
 
         # Pause before showing menu again
         input("\nPress Enter to continue...")
