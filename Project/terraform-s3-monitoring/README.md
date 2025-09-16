@@ -45,11 +45,11 @@ After successful deployment, you should see output similar to:
 Apply complete! Resources: 15 added, 0 changed, 0 destroyed.
 
 Outputs:
-primary_bucket_name = "your-monitored-bucket-abc12345"
+primary_bucket_name = "my-monitored-bucket-abc12345"
 lambda_function_name = "s3-event-processor"
 cloudwatch_log_group_name = "/aws/lambda/s3-event-processor"
 test_commands = {
-  "upload_test_file" = "aws s3 cp test.txt s3://your-monitored-bucket-abc12345/"
+  "upload_test_file" = "aws s3 cp test.txt s3://my-monitored-bucket-abc12345/"
   "view_lambda_logs" = "aws logs tail /aws/lambda/s3-event-processor --follow"
   "view_cloudtrail_logs" = "aws s3 ls s3://cloudtrail-logs-bucket-abc12345/cloudtrail-logs/ --recursive"
 }
@@ -70,7 +70,7 @@ BUCKET_NAME=$(terraform output -raw primary_bucket_name)
 aws s3 cp test.txt s3://$BUCKET_NAME/
 
 # Expected output:
-# upload: ./test.txt to s3://your-monitored-bucket-abc12345/test.txt
+# upload: ./test.txt to s3://my-monitored-bucket-abc12345/test.txt
 ```
 
 ### Test 2: Download a File (GetObject)
@@ -80,7 +80,7 @@ aws s3 cp test.txt s3://$BUCKET_NAME/
 aws s3 cp s3://$BUCKET_NAME/test.txt downloaded-test.txt
 
 # Expected output:
-# download: s3://your-monitored-bucket-abc12345/test.txt to ./downloaded-test.txt
+# download: s3://my-monitored-bucket-abc12345/test.txt to ./downloaded-test.txt
 ```
 
 ### Test 3: Check File Metadata (HeadObject)
@@ -178,13 +178,13 @@ When functioning correctly, your Lambda logs will contain CloudTrail events with
   "sourceIPAddress": "192.168.1.100",
   "userAgent": "[aws-cli/2.22.18...]",
   "requestParameters": {
-    "bucketName": "your-monitored-bucket-abc12345",
+    "bucketName": "my-monitored-bucket-abc12345",
     "key": "test.txt"
   },
   "resources": [
     {
       "type": "AWS::S3::Object",
-      "ARN": "arn:aws:s3:::your-monitored-bucket-abc12345/test.txt"
+      "ARN": "arn:aws:s3:::my-monitored-bucket-abc12345/test.txt"
     }
   ],
   "eventType": "AwsApiCall",
