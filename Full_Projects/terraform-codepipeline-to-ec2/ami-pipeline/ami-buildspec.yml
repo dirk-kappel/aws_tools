@@ -1,0 +1,39 @@
+version: 0.2
+
+phases:
+  install:
+    commands:
+      - echo "Installing Packer..."
+      - wget -q https://releases.hashicorp.com/packer/1.9.4/packer_1.9.4_linux_amd64.zip
+      - unzip packer_1.9.4_linux_amd64.zip
+      - chmod +x packer
+      - mv packer /usr/local/bin/
+
+  pre_build:
+    commands:
+      - echo "Pre-build phase started on $(date)"
+      - echo "Validating Packer template..."
+      - cd Full_Projects/terraform-codepipeline-to-ec2/ami-pipeline
+      - packer validate packer-template.pkr.hcl
+
+  build:
+    commands:
+      - echo "Build phase started on $(date)"
+      - echo "Building AMI with Packer..."
+      - packer build packer-template.pkr.hcl
+      - echo "AMI build completed successfully"
+
+  post_build:
+    commands:
+      - echo "Post-build phase started on $(date)"
+      - echo "Extracting AMI ID from Packer output..."
+      # Extract AMI ID from Packer output and save to file
+      - AMI_ID=$(packer build packer-template.pkr.hcl 2>&1 | grep 'ami-' | tail -n1 | sed 's/.*\(ami-[a-z0-9]*\).*/\1/')
+      - echo "Built AMI ID: $AMI_ID"
+      - echo "$AMI_ID" > ami_id.txt
+      - echo "AMI build finished on $(date)"
+
+artifacts:
+  files:
+    - ami_id.txt
+  name: ami-build-$(date +%Y-%m-%d-%H-%M-%S)
