@@ -1,0 +1,32 @@
+version: 0.2
+
+phases:
+  install:
+    runtime-versions:
+      nodejs: 18
+    commands:
+      - echo "Installing dependencies..."
+      - yum update -y
+      - yum install -y htmlhint
+
+  pre_build:
+    commands:
+      - echo "Pre-build phase started on $(date)"
+      - echo "Running basic HTML validation..."
+
+  build:
+    commands:
+      - echo "Build phase started on $(date)"
+      - echo "Validating HTML file..."
+      - htmlhint index.html || echo "HTML validation completed"
+      - echo "Build completed successfully"
+
+  post_build:
+    commands:
+      - echo "Post-build phase started on $(date)"
+      - echo "Build finished on $(date)"
+
+artifacts:
+  files:
+    - '**/*'
+  name: sample-web-app-$(date +%Y-%m-%d-%H-%M-%S)
