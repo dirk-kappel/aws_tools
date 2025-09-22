@@ -75,7 +75,7 @@ data "archive_file" "lambda_zip" {
   type        = "zip"
   output_path = "blue_green_deployment.zip"
   source {
-    content  = file("${path.module}/blue-green-deployment.py")
+    content  = file("../ami-pipeline/blue-green-deployment.py")
     filename = "blue-green-deployment.py"
   }
 }
