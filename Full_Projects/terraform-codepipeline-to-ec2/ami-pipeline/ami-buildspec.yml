@@ -20,20 +20,20 @@ phases:
     commands:
       - echo "Build phase started on $(date)"
       - echo "Building AMI with Packer..."
-      - packer build packer-template.pkr.hcl
+      - packer build -machine-readable packer-template.pkr.hcl | tee packer-output.log
       - echo "AMI build completed successfully"
 
   post_build:
     commands:
       - echo "Post-build phase started on $(date)"
       - echo "Extracting AMI ID from Packer output..."
-      # Extract AMI ID from Packer output and save to file
-      - AMI_ID=$(packer build packer-template.pkr.hcl 2>&1 | grep 'ami-' | tail -n1 | sed 's/.*\(ami-[a-z0-9]*\).*/\1/')
-      - echo "Built AMI ID: $AMI_ID"
+      - AMI_ID=$(grep 'artifact,0,id' packer-output.log | cut -d, -f6 | cut -d: -f2)
+      - echo "Built AMI ID:$AMI_ID"
       - echo "$AMI_ID" > ami_id.txt
       - echo "AMI build finished on $(date)"
 
 artifacts:
   files:
     - ami_id.txt
+    - packer-output.log
   name: ami-build-$(date +%Y-%m-%d-%H-%M-%S)
