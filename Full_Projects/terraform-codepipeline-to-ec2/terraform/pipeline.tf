@@ -1,8 +1,8 @@
 # CodeBuild Project
 resource "aws_codebuild_project" "main" {
-  name          = "${var.project_name}-build"
-  description   = "Build project for ${var.project_name}"
-  service_role  = aws_iam_role.codebuild_role.arn
+  name         = "${var.project_name}-build"
+  description  = "Build project for ${var.project_name}"
+  service_role = aws_iam_role.codebuild_role.arn
 
   artifacts {
     type = "CODEPIPELINE"
@@ -15,7 +15,7 @@ resource "aws_codebuild_project" "main" {
   }
 
   source {
-    type = "CODEPIPELINE"
+    type      = "CODEPIPELINE"
     buildspec = "${var.source_location}/buildspec.yml"
   }
 
@@ -42,7 +42,7 @@ resource "aws_codedeploy_deployment_group" "main" {
 
   deployment_config_name = "CodeDeployDefault.AllAtOnce"
 
-  auto_scaling_groups = [aws_autoscaling_group.main.name]
+  autoscaling_groups = [aws_autoscaling_group.main.name]
 
   deployment_style {
     deployment_option = "WITHOUT_TRAFFIC_CONTROL"
@@ -89,10 +89,6 @@ resource "aws_codepipeline" "main" {
         ConnectionArn    = aws_codestarconnections_connection.github.arn
         FullRepositoryId = "${var.github_owner}/${var.github_repo}"
         BranchName       = var.github_branch
-        # Only trigger when index.html in sample-app directory change
-        FilePathFilters = jsonencode([
-          "Full_Projects/terraform-codepipeline-to-ec2/sample-app/index.html"
-        ])
       }
     }
   }
