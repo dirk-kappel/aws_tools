@@ -66,12 +66,26 @@ resource "aws_codestarconnections_connection" "github" {
 
 # CodePipeline
 resource "aws_codepipeline" "main" {
-  name     = "${var.project_name}-pipeline"
-  role_arn = aws_iam_role.codepipeline_role.arn
+  name          = "${var.project_name}-pipeline"
+  role_arn      = aws_iam_role.codepipeline_role.arn
+  pipeline_type = "V2"
 
   artifact_store {
     location = aws_s3_bucket.codepipeline_artifacts.bucket
     type     = "S3"
+  }
+
+  # Git triggers for path-based filtering
+  trigger {
+    provider_type = "CodeStarSourceConnection"
+    git_configuration {
+      source_action_name = "Source"
+      push {
+        file_paths {
+          includes = ["Full_Projects/terraform-codepipeline-to-ec2/sample-app/index.html"]
+        }
+      }
+    }
   }
 
   stage {
