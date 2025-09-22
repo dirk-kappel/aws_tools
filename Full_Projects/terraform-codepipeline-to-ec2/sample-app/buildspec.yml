@@ -6,13 +6,15 @@ phases:
       nodejs: 18
     commands:
       - echo "Installing dependencies..."
-      - yum update -y
-      - yum install -y htmlhint
+      - dnf update -y
+      - dnf install -y nodejs npm
+      - npm install -g htmlhint
 
   pre_build:
     commands:
       - echo "Pre-build phase started on $(date)"
       - echo "Running basic HTML validation..."
+      - cd Full_Projects/terraform-codepipeline-to-ec2/sample-app
 
   build:
     commands:
@@ -30,3 +32,4 @@ artifacts:
   files:
     - '**/*'
   name: sample-web-app-$(date +%Y-%m-%d-%H-%M-%S)
+  base-directory: 'Full_Projects/terraform-codepipeline-to-ec2/sample-app'
